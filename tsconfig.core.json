@@ -1,0 +1,8 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true
+  },
+  "include": ["src/nuggets/**/*.ts"],
+  "exclude": ["src/gateway", "gateway", "blog", "node_modules", "dist"]
+}

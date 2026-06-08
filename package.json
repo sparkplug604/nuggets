@@ -3,18 +3,28 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "types": "./dist/nuggets/index.d.ts",
   "scripts": {
-    "dev": "tsx src/gateway/main.ts",
+    "dev": "npm run dev:gateway",
+    "dev:gateway": "tsx src/gateway/main.ts",
     "build": "tsc",
     "start": "node dist/gateway/main.js",
+    "typecheck:core": "tsc --noEmit -p tsconfig.core.json",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
+    "bench:capacity": "tsx scripts/capacity-benchmark.ts",
     "setup": "tsx src/setup.ts",
     "migrate:memory": "tsx src/migrate-memory.ts"
   },
+  "exports": {
+    ".": {
+      "types": "./dist/nuggets/index.d.ts",
+      "import": "./dist/nuggets/index.js"
+    }
+  },
   "dependencies": {
     "@hapi/boom": "^10.0.1",
-    "@whiskeysockets/baileys": "^6.7.16",
+    "@whiskeysockets/baileys": "^7.0.0-rc13",
     "dotenv": "^16.4.7",
     "grammy": "^1.41.1",
     "pino": "^9.6.0",
@@ -24,6 +34,6 @@
     "@types/node": "^22.13.0",
     "tsx": "^4.19.0",
     "typescript": "^5.7.0",
-    "vitest": "^3.0.0"
+    "vitest": "^4.1.8"
   }
 }

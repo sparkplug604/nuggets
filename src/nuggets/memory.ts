@@ -26,11 +26,57 @@ import {
 
 export const DEFAULT_SAVE_DIR = join(homedir(), ".nuggets");
 
-interface Fact {
+export type PromotionState = "candidate" | "promoted" | "blocked" | "quarantined";
+
+export interface Fact {
   key: string;
   value: string;
   hits: number;
   last_hit_session: string;
+  created_at: string;
+  updated_at: string;
+  source?: string;
+  expires_at?: string;
+  previous_values?: string[];
+  contradiction_group?: string;
+  confidence?: number;
+  last_recall_confidence?: number;
+  last_recall_margin?: number;
+  promotion_state?: PromotionState;
+}
+
+export interface RememberOptions {
+  source?: string;
+  expiresAt?: string;
+  confidence?: number;
+  promotionState?: PromotionState;
+}
+
+export interface RecallCandidate {
+  answer: string;
+  raw_score: number;
+  probability: number;
+}
+
+export interface RecallOptions {
+  topK?: number;
+  minConfidence?: number;
+  minMargin?: number;
+  abstainOnUncertainty?: boolean;
+}
+
+export interface RecallResult {
+  answer: string | null;
+  confidence: number;
+  margin: number;
+  found: boolean;
+  key: string;
+  abstained: boolean;
+  reason: string;
+  raw_score: number;
+  entropy: number;
+  capacity_pressure: number;
+  top_k: RecallCandidate[];
 }
 
 interface BankData {
@@ -77,6 +123,8 @@ export class Nugget {
   private _orthIters = 1;
   private _orthStep = 0.4;
   private _fuzzyThreshold = 0.55;
+  private _defaultMinConfidence = 0.12;
+  private _defaultMinMargin = 0.001;
 
   private _facts: Fact[] = [];
   private _E: EnsembleData[] | null = null;
@@ -104,21 +152,44 @@ export class Nugget {
 
   // -- public API ----------------------------------------------------------
 
-  remember(key: string, value: string): void {
+  remember(key: string, value: string, opts: RememberOptions = {}): void {
     key = key.trim();
     value = value.trim();
     if (!key || !value) return;
 
+    const now = new Date().toISOString();
+
     let found = false;
     for (const f of this._facts) {
       if (f.key.toLowerCase() === key.toLowerCase()) {
+        if (f.value !== value) {
+          f.previous_values = [...new Set([...(f.previous_values || []), f.value])];
+          f.contradiction_group = f.contradiction_group || `key:${key.toLowerCase()}`;
+          f.promotion_state = "quarantined";
+        }
         f.value = value;
+        f.updated_at = now;
+        f.source = opts.source ?? f.source;
+        f.expires_at = opts.expiresAt ?? f.expires_at;
+        f.confidence = opts.confidence ?? f.confidence;
+        f.promotion_state = opts.promotionState ?? f.promotion_state;
         found = true;
         break;
       }
     }
     if (!found) {
-      this._facts.push({ key, value, hits: 0, last_hit_session: "" });
+      this._facts.push({
+        key,
+        value,
+        hits: 0,
+        last_hit_session: "",
+        created_at: now,
+        updated_at: now,
+        source: opts.source,
+        expires_at: opts.expiresAt,
+        confidence: opts.confidence,
+        promotion_state: opts.promotionState ?? "candidate",
+      });
     }
 
     // Evict oldest facts if max_facts exceeded
@@ -133,8 +204,21 @@ export class Nugget {
   recall(
     query: string,
     sessionId = "",
-  ): { answer: string | null; confidence: number; margin: number; found: boolean; key: string } {
-    const empty = { answer: null, confidence: 0, margin: 0, found: false, key: "" };
+    opts: RecallOptions = {},
+  ): RecallResult {
+    const empty = {
+      answer: null,
+      confidence: 0,
+      margin: 0,
+      found: false,
+      key: "",
+      abstained: false,
+      reason: "",
+      raw_score: 0,
+      entropy: 0,
+      capacity_pressure: this._capacityPressure(),
+      top_k: [],
+    };
     if (this._facts.length === 0) return empty;
 
     if (this._dirty || this._E === null) {
@@ -145,7 +229,8 @@ export class Nugget {
     const tag = this._resolveTag(query);
     if (!tag || !this._tagToPos.has(tag)) return empty;
 
-    const { word, probs } = this._decode(tag);
+    const { word, sims, probs } = this._decode(tag);
+    const topK = rankCandidates(this._vocabWords, sims, probs, opts.topK ?? 3);
 
     // Top-2 for confidence/margin
     let top1 = -Infinity;
@@ -158,8 +243,24 @@ export class Nugget {
         top2 = probs[i];
       }
     }
-    const confidence = top1;
-    const margin = top2 === -Infinity ? top1 : top1 - top2;
+    const probabilityMargin = top2 === -Infinity ? top1 : top1 - top2;
+    const rawScore = topK[0]?.raw_score ?? 0;
+    const rawMargin = topK.length > 1 ? rawScore - topK[1].raw_score : Math.max(rawScore, 0);
+    const capacityPressure = this._capacityPressure();
+    const entropy = normalizedEntropy(probs);
+    const confidence = calibratedConfidence(rawScore, rawMargin, entropy, capacityPressure);
+    const minConfidence = opts.minConfidence ?? this._defaultMinConfidence;
+    const minMargin = opts.minMargin ?? this._defaultMinMargin;
+    const abstainOnUncertainty = opts.abstainOnUncertainty ?? true;
+    const reason = recallAbstentionReason({
+      confidence,
+      margin: rawMargin,
+      entropy,
+      capacityPressure,
+      minConfidence,
+      minMargin,
+    });
+    const abstained = abstainOnUncertainty && reason !== "";
 
     // Hit tracking (per-session dedup)
     if (sessionId) {
@@ -168,11 +269,25 @@ export class Nugget {
       if (fact.last_hit_session !== sessionId) {
         fact.hits = (fact.hits || 0) + 1;
         fact.last_hit_session = sessionId;
+        fact.last_recall_confidence = confidence;
+        fact.last_recall_margin = rawMargin;
         if (this.autoSave) this.save();
       }
     }
 
-    return { answer: word, confidence, margin, found: true, key: tag };
+    return {
+      answer: abstained ? null : word,
+      confidence,
+      margin: rawMargin || probabilityMargin,
+      found: !abstained,
+      key: tag,
+      abstained,
+      reason,
+      raw_score: rawScore,
+      entropy,
+      capacity_pressure: capacityPressure,
+      top_k: topK,
+    };
   }
 
   forget(key: string): boolean {
@@ -187,12 +302,8 @@ export class Nugget {
     return removed;
   }
 
-  facts(): Array<{ key: string; value: string; hits: number }> {
-    return this._facts.map((f) => ({
-      key: f.key,
-      value: f.value,
-      hits: f.hits || 0,
-    }));
+  facts(): Fact[] {
+    return this._facts.map((f) => ({ ...f, previous_values: f.previous_values ? [...f.previous_values] : undefined }));
   }
 
   clear(): void {
@@ -212,9 +323,11 @@ export class Nugget {
     ensembles: number;
     capacity_used_pct: number;
     capacity_warning: string;
+    capacity_estimate: number;
+    capacity_pressure: number;
     max_facts: number;
   } {
-    const capacityEst = this.banks * Math.floor(Math.sqrt(this.D));
+    const capacityEst = this._capacityEstimate();
     const usedPct = capacityEst > 0 ? (this._facts.length / capacityEst) * 100 : 0;
     let capacityWarning = "";
     if (usedPct > 90) capacityWarning = "CRITICAL: nearly full";
@@ -228,6 +341,8 @@ export class Nugget {
       ensembles: this.ensembles,
       capacity_used_pct: Math.round(usedPct * 10) / 10,
       capacity_warning: capacityWarning,
+      capacity_estimate: capacityEst,
+      capacity_pressure: this._capacityPressure(),
       max_facts: this.maxFacts,
     };
   }
@@ -287,6 +402,16 @@ export class Nugget {
       value: f.value,
       hits: f.hits ?? 0,
       last_hit_session: f.last_hit_session ?? "",
+      created_at: f.created_at ?? new Date(0).toISOString(),
+      updated_at: f.updated_at ?? new Date(0).toISOString(),
+      source: f.source,
+      expires_at: f.expires_at,
+      previous_values: f.previous_values,
+      contradiction_group: f.contradiction_group,
+      confidence: f.confidence,
+      last_recall_confidence: f.last_recall_confidence,
+      last_recall_margin: f.last_recall_margin,
+      promotion_state: f.promotion_state,
     }));
 
     if (n._facts.length > 0) {
@@ -438,6 +563,16 @@ export class Nugget {
     return { word: this._vocabWords[bestIdx], sims: simsSum, probs };
   }
 
+  private _capacityEstimate(): number {
+    return this.banks * Math.floor(Math.sqrt(this.D));
+  }
+
+  private _capacityPressure(): number {
+    const capacityEst = this._capacityEstimate();
+    if (capacityEst <= 0) return 1;
+    return Math.round((this._facts.length / capacityEst) * 1000) / 1000;
+  }
+
   /** Fuzzy-match query to stored keys (threshold >= 0.55). */
   private _resolveTag(query: string): string {
     if (this._tagToPos.size === 0) return "";
@@ -535,6 +670,76 @@ function tokenOverlapScore(queryTokens: Set<string>, tagTokens: Set<string>): nu
     if (tagTokens.has(token)) overlap++;
   }
   return overlap / Math.max(1, Math.min(queryTokens.size, tagTokens.size));
+}
+
+function rankCandidates(
+  words: string[],
+  sims: Float64Array,
+  probs: Float64Array,
+  topK: number,
+): RecallCandidate[] {
+  const indexes = [...words.keys()];
+  indexes.sort((a, b) => sims[b] - sims[a]);
+  return indexes.slice(0, Math.max(1, topK)).map((idx) => ({
+    answer: words[idx],
+    raw_score: roundMetric(sims[idx]),
+    probability: roundMetric(probs[idx]),
+  }));
+}
+
+function normalizedEntropy(probs: Float64Array): number {
+  if (probs.length <= 1) return 0;
+  let entropy = 0;
+  for (const p of probs) {
+    if (p > 0) entropy -= p * Math.log(p);
+  }
+  return roundMetric(entropy / Math.log(probs.length));
+}
+
+function calibratedConfidence(
+  rawScore: number,
+  rawMargin: number,
+  entropy: number,
+  capacityPressure: number,
+): number {
+  const scoreComponent = clamp((rawScore + 0.1) / 0.35, 0, 1);
+  const marginComponent = clamp(rawMargin / 0.08, 0, 1);
+  const entropyComponent = clamp(1 - entropy, 0, 1);
+  const capacityComponent = clamp(1 - Math.max(0, capacityPressure - 0.8) / 0.7, 0, 1);
+  return roundMetric(
+    0.4 * scoreComponent +
+    0.35 * marginComponent +
+    0.15 * entropyComponent +
+    0.1 * capacityComponent,
+  );
+}
+
+function recallAbstentionReason(args: {
+  confidence: number;
+  margin: number;
+  entropy: number;
+  capacityPressure: number;
+  minConfidence: number;
+  minMargin: number;
+}): string {
+  if (args.capacityPressure >= 1.25 && args.entropy > 0.99) {
+    return "capacity_pressure";
+  }
+  if (args.capacityPressure >= 1.25 && args.margin < args.minMargin * 4) {
+    return "capacity_pressure";
+  }
+  if (args.confidence < args.minConfidence) return "low_confidence";
+  if (args.margin < args.minMargin) return "low_margin";
+  if (args.entropy > 0.995 && args.margin < args.minMargin * 2) return "high_entropy";
+  return "";
+}
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.max(min, Math.min(max, value));
+}
+
+function roundMetric(value: number): number {
+  return Math.round(value * 1_000_000) / 1_000_000;
 }
 
 /** Count matching characters using longest common subsequence blocks. */

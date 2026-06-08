@@ -6,31 +6,28 @@ Nuggets is a **fast key-value memory** backed by Holographic Reduced Representat
 
 Think of it as **L1 cache for your agent**: tiny, fast, lossy, and associative.
 
-## CLI (primary interface)
+## Current Interface
 
-After `pip install nuggets`, these commands are available immediately:
+This repository is currently a TypeScript project. It does not include a Python package or installed `nuggets` CLI in this checkout. Use the TypeScript API from `src/nuggets/`, the Pi extension in `.pi/extensions/nuggets.ts`, or the project scripts below.
 
 ```bash
-nuggets remember <nugget> <key> <value>    # Store a fact (auto-creates nugget)
-nuggets recall <query> [--nugget <name>]   # Query memory (searches all nuggets by default)
-nuggets forget <nugget> <key>              # Remove a fact
-nuggets list                               # List all nuggets
-nuggets status                             # Overall status
-nuggets facts <nugget>                     # List facts in a nugget
-nuggets clear <nugget>                     # Clear all facts from a nugget
+npm test                    # run unit tests
+npm run typecheck:core      # type-check only the memory engine
+npm run bench:capacity      # measure recall accuracy and abstention under load
+npm run dev:gateway         # run the Telegram/WhatsApp gateway prototype
 ```
 
-Add `--json` to `recall`, `list`, `status`, or `facts` for machine-readable output.
+If a CLI or MCP server is added later, document the exact package name, bin name, and install command here.
 
 ## The recall-first pattern
 
 **Always try `nuggets recall` before expensive operations.** This is the core usage pattern:
 
 1. Agent gets a question or needs to find something
-2. `nuggets recall "the question"` — check memory first (free, instant)
+2. call `NuggetShelf.recall(...)` or the Pi `nuggets` tool — check memory first (free, instant)
 3. If found → use the answer
 4. If not found → do the expensive search/API call/file read
-5. `nuggets remember <topic> "key" "answer"` — cache for next time
+5. call `remember(...)` with a short key, value, and source — cache for next time
 
 ## When to use it
 
@@ -43,7 +40,7 @@ Add `--json` to `recall`, `list`, `status`, or `facts` for machine-readable outp
 
 - Large documents or code blocks (values should be short strings)
 - More than ~250 facts per nugget (create multiple nuggets instead)
-- Anything requiring exact text retrieval (HRR is approximate)
+- Anything requiring exact text retrieval (HRR is approximate and may abstain under uncertainty)
 - Structured queries, joins, or filtering (use a real database)
 
 ## Suggested nugget organization
@@ -55,15 +52,15 @@ Add `--json` to `recall`, `list`, `status`, or `facts` for machine-readable outp
 | `locations` | Where things are defined | "auth handler" → "src/auth/middleware.ts:47" |
 | `debug` | Past bug diagnoses | "CORS error" → "add origin to allowlist in config.ts" |
 
-## Optional: Python API
+## TypeScript API
 
-```python
-from nuggets import Nugget
+```ts
+import { Nugget } from "./src/nuggets/index.js";
 
-n = Nugget("my_memory")
-n.remember("wifi_password", "test123")
-result = n.recall("what is the wifi password")
-print(result)  # {answer: "test123", confidence: 0.85, ...}
+const n = new Nugget({ name: "my_memory", autoSave: false });
+n.remember("test command", "npm test", { source: "project docs" });
+const result = n.recall("what is the test command");
+console.log(result.answer, result.confidence, result.abstained);
 ```
 
 ## Capacity guidelines

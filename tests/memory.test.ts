@@ -17,11 +17,14 @@ afterEach(() => {
 describe("Nugget", () => {
   it("remembers and recalls a fact", () => {
     const n = new Nugget({ name: "test", D: 512, banks: 2, autoSave: false });
-    n.remember("color", "blue");
+    n.remember("color", "blue", { source: "test" });
     const result = n.recall("color");
     expect(result.found).toBe(true);
     expect(result.answer).toBe("blue");
     expect(result.confidence).toBeGreaterThan(0);
+    expect(result.top_k[0].answer).toBe("blue");
+    expect(result.capacity_pressure).toBeGreaterThan(0);
+    expect(n.facts()[0].source).toBe("test");
   });
 
   it("upserts on duplicate key", () => {
@@ -29,6 +32,8 @@ describe("Nugget", () => {
     n.remember("color", "blue");
     n.remember("color", "red");
     expect(n.facts()).toHaveLength(1);
+    expect(n.facts()[0].previous_values).toContain("blue");
+    expect(n.facts()[0].promotion_state).toBe("quarantined");
     const result = n.recall("color");
     expect(result.answer).toBe("red");
   });
@@ -158,5 +163,31 @@ describe("Nugget", () => {
     n.remember("key", "");
     n.remember("  ", "value");
     expect(n.facts()).toHaveLength(0);
+  });
+
+  it("abstains when an overloaded memory has high-entropy recall", () => {
+    const n = new Nugget({ name: "overloaded", D: 256, banks: 1, autoSave: false });
+    for (let i = 0; i < 128; i++) {
+      n.remember(`key-${i}`, `value-${i}`);
+    }
+
+    const result = n.recall("key-64");
+    expect(result.found).toBe(false);
+    expect(result.abstained).toBe(true);
+    expect(result.reason).toBe("capacity_pressure");
+    expect(result.top_k.length).toBeGreaterThan(1);
+  });
+
+  it("can return uncertain recall diagnostics when abstention is disabled", () => {
+    const n = new Nugget({ name: "diagnostics", D: 256, banks: 1, autoSave: false });
+    for (let i = 0; i < 128; i++) {
+      n.remember(`key-${i}`, `value-${i}`);
+    }
+
+    const result = n.recall("key-64", "", { abstainOnUncertainty: false });
+    expect(result.found).toBe(true);
+    expect(result.abstained).toBe(false);
+    expect(result.reason).toBe("capacity_pressure");
+    expect(result.capacity_pressure).toBeGreaterThan(1);
   });
 });

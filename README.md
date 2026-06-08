@@ -1,53 +1,27 @@
 # Nuggets
-A personal AI assistant that remembers. Nuggets combines holographic memory with a multi-channel messaging gateway so your AI actually learns from conversations — facts recalled often get promoted to permanent memory, and everything persists across restarts.
+A TypeScript holographic memory engine for small, durable agent facts, plus the original Pi messaging gateway prototype. Nuggets stores short key-value facts in fixed-size HRR-style complex vectors, recalls them locally, and now records promotion decisions before writing facts into permanent context.
 ![Logo](https://github.com/NeoVertex1/nuggets/blob/d180ee6df491d2db741eed0bf254ba917a4c12e2/images/Gemini_Generated_Image_mgaktymgaktymgak.png)
 
-## New: Nuggets Memory plugin
+## Package Status
 
-If you want the new plugin/MCP version of Nuggets for coding agents, start here.
+This checkout contains:
 
-Package:
-- `nuggets-memory-plugin`
+- `src/nuggets/` — the zero-dependency core memory engine
+- `.pi/extensions/` — Pi agent extensions for memory and proactive scheduling
+- `src/gateway/` — the original Telegram/WhatsApp gateway
+- `gateway/` — an older standalone gateway package copy kept for compatibility
+- `scripts/capacity-benchmark.ts` — repeatable HRR capacity measurement
 
-Install:
-```bash
-npm install -g nuggets-memory-plugin
-```
+It does not currently include a `nuggets-memory/` plugin workspace, an MCP server entrypoint, or a Python package/CLI. If those surfaces are added later, they should be documented with the exact package path and install command that exists in this repository.
 
-Then register it with your agent host using the host's native MCP command.
-
-### Hermes Agent
-```bash
-hermes mcp add nuggets-memory --command nuggets-memory-plugin
-```
-
-### Claude Code
-```bash
-claude mcp add nuggets-memory -- nuggets-memory-plugin
-```
-
-### Codex
-```bash
-codex mcp add nuggets-memory -- nuggets-memory-plugin
-```
-
-What the plugin is for:
-- lightweight cross-session memory nudges
-- short durable facts
-- preferences, corrections, and tiny project hints
-- MCP tools like `guide`, `nudges`, `recall`, `remember`, `list`, and `status`
-
-Notes:
-- If startup speed matters, prefer the globally installed binary above over `npx`.
-- The plugin-first workspace and release flow live in [`nuggets-memory/`](./nuggets-memory).
-- The rest of this README documents the original Nuggets app/gateway project and older non-plugin workflow.
+The active development branch in this fork is `memory-governance`; see [`docs/fork-workflow.md`](docs/fork-workflow.md) for fork-safe remotes and publishing rules.
 
 ## Why Nuggets?
 
 LLM agents forget everything between sessions. RAG systems fix this but need vector databases, embedding APIs, and infrastructure. Nuggets takes a different approach:
 
 - **Holographic memory** — facts are stored as superposed complex-valued vectors using Holographic Reduced Representations (HRR). Recall is algebraic, sub-millisecond, and runs locally with zero external dependencies.
-- **Self-improving** — when a fact is recalled 3+ times across sessions, it gets promoted to permanent context. The agent gets faster and cheaper over time.
+- **Governed promotion** — repeated recall is recorded in a promotion ledger. Facts can be blocked for low confidence, low margin, contradictions, expiry, or missing provenance.
 - **Proactive** — the assistant doesn't just respond. It checks in periodically, runs scheduled tasks, and sends reminders — all through the same Telegram or WhatsApp chat.
 
 Think of it as an AI that lives in your pocket, remembers what matters, and reaches out when it has something useful to say.
@@ -61,9 +35,9 @@ The core of the system. Pure TypeScript, zero dependencies.
 Each "nugget" is a topic-scoped memory (e.g., `user`, `project`, `agent`). Facts are key-value pairs compressed into a fixed-size complex vector via HRR binding. Multiple facts superpose into one mathematical object but remain individually retrievable.
 
 - **remember** — bind a key-value pair into the holographic vector
-- **recall** — unbind a query and decode via cosine similarity (~1ms), with token-overlap matching for natural language queries
+- **recall** — unbind a query and decode via cosine similarity, with token-overlap matching, calibrated confidence, top-k candidates, entropy, capacity pressure, and abstention
 - **forget** — subtract a binding from the superposition
-- **promote** — facts recalled 3+ times get written to `MEMORY.md` for permanent context
+- **promote** — facts are evaluated through a promotion ledger before being written to `MEMORY.md`
 - **memory kinds** — facts are auto-classified into `user` (preferences), `project` (files, commands, repo context), or `agent` (self-knowledge) scopes. Recall searches across kinds in priority order.
 
 Storage is a simple JSON file per kind at `~/.nuggets/` (e.g., `user.nugget.json`, `project.nugget.json`). Vectors are never serialized — they're rebuilt deterministically from a seeded PRNG, so the files stay tiny. A migration script (`npm run migrate:memory`) splits legacy single-file memory into the new kind-based layout.
@@ -107,7 +81,15 @@ git clone https://github.com/NeoVertex1/nuggets.git
 cd nuggets
 npm install
 npm run setup
-npm run dev
+npm run dev:gateway
+```
+
+Core-only checks do not require the Telegram/WhatsApp gateway to run:
+
+```bash
+npm run typecheck:core
+npm test
+npm run bench:capacity
 ```
 
 ### Setup Wizard
@@ -190,7 +172,7 @@ EventQueue ◄── cron fires ── "0 9 * * *"
 
 **Proactive flow**: Heartbeat timer fires → Pi checks memory for anything worth following up on → if yes, sends you a message. If not, stays silent.
 
-**Memory promotion**: After enough sessions, facts that keep getting recalled (3+ times) are promoted from holographic memory to `MEMORY.md`, where they become permanent context for every future session.
+**Memory promotion**: After enough sessions, facts that keep getting recalled are evaluated by `promoteFacts()`. The promotion ledger records whether each fact was promoted or blocked, and why. Promoted facts are written to `MEMORY.md`; blocked facts remain in the nugget but do not become permanent context.
 
 ## Architecture
 
@@ -201,7 +183,7 @@ src/
     memory.ts           Nugget class: remember, recall, forget (+ token-overlap matching)
     shelf.ts            NuggetShelf: multi-nugget manager with kind-aware routing
     kinds.ts            Memory kind types, auto-classification heuristics
-    promote.ts          MEMORY.md promotion (3+ recall threshold)
+    promote.ts          MEMORY.md promotion ledger and quality gates
     index.ts            Public API
 
   migrate-memory.ts     Migration: legacy single nugget → kind-based layout
@@ -230,8 +212,11 @@ src/
 | Command | What it does |
 |---|---|
 | `npm run setup` | Interactive setup wizard — creates `.env` |
-| `npm run dev` | Start the gateway (Telegram + WhatsApp) |
+| `npm run dev` | Alias for `npm run dev:gateway` |
+| `npm run dev:gateway` | Start the gateway (Telegram + WhatsApp) |
 | `npm test` | Run tests |
+| `npm run typecheck:core` | Type-check only the core memory engine |
+| `npm run bench:capacity` | Run repeatable capacity/abstention benchmark |
 | `npm run migrate:memory` | Migrate legacy single-file memory to kind-based layout |
 | `npm run typecheck` | Type-check without emitting |
 | `npm run build` | Compile to `dist/` |

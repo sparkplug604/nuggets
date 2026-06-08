@@ -10,6 +10,20 @@ import { join } from "node:path";
 import { Nugget, DEFAULT_SAVE_DIR } from "./memory.js";
 import { DEFAULT_KIND_NAMES, type MemoryKind } from "./kinds.js";
 
+const EMPTY_RECALL = {
+  answer: null,
+  confidence: 0,
+  margin: 0,
+  found: false,
+  key: "",
+  abstained: false,
+  reason: "",
+  raw_score: 0,
+  entropy: 0,
+  capacity_pressure: 0,
+  top_k: [],
+};
+
 export class NuggetShelf {
   readonly saveDir: string;
   readonly autoSave: boolean;
@@ -94,11 +108,7 @@ export class NuggetShelf {
     }
 
     let best: ReturnType<Nugget["recall"]> & { nugget_name: string | null } = {
-      answer: null,
-      confidence: 0,
-      margin: 0,
-      found: false,
-      key: "",
+      ...EMPTY_RECALL,
       nugget_name: null,
     };
 
@@ -117,11 +127,7 @@ export class NuggetShelf {
     sessionId = "",
   ): ReturnType<Nugget["recall"]> & { nugget_name: string | null } {
     let best: ReturnType<Nugget["recall"]> & { nugget_name: string | null } = {
-      answer: null,
-      confidence: 0,
-      margin: 0,
-      found: false,
-      key: "",
+      ...EMPTY_RECALL,
       nugget_name: null,
     };
 
